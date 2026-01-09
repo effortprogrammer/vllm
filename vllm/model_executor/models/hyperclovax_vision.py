@@ -1490,8 +1490,14 @@ class HCXVisionV2MultiModalProcessor(
             hasattr(hf_config, "audio_config") and hf_config.audio_config is not None
         )
 
+        # Get the HF processor
+        hf_processor = self.info.get_hf_processor(**mm_kwargs)
+
         # Build data dict for HF processor (images/videos only)
         # The HF processor (HCXVisionV2Processor) doesn't support audio
+        # NOTE: We pass the prompt as-is without token normalization.
+        # Token expansion is handled by vLLM via _get_prompt_updates since
+        # _hf_processor_applies_updates returns False.
         data: dict[str, object] = dict(
             text=prompt,
             images=images,
@@ -1499,7 +1505,7 @@ class HCXVisionV2MultiModalProcessor(
         )
 
         processed_outputs = self.info.ctx.call_hf_processor(
-            hf_processor=self.info.get_hf_processor(**mm_kwargs),
+            hf_processor=hf_processor,
             data=data,
         )
 
@@ -1525,10 +1531,23 @@ class HCXVisionV2MultiModalProcessor(
 
         return processed_outputs
 
-    # NOTE: We don't override _hf_processor_applies_updates here.
-    # The default behavior returns True when processing actual image data,
-    # meaning the HF processor already handles image token expansion.
-    # This is consistent with Qwen2-VL's approach.
+    def _hf_processor_applies_updates(
+        self,
+        prompt_text: str,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Mapping[str, object],
+    ) -> bool:
+        # HyperCLOVAX V2 has a token case mismatch bug:
+        # - Chat template uses <|IMAGE_PAD|> (uppercase)
+        # - HF processor (Qwen2_5_VLProcessor) expects <|image_pad|> (lowercase)
+        # - Tokenizer vocab has <|IMAGE_PAD|> (uppercase) = token ID 128060
+        #
+        # The HF processor's token expansion fails because it looks for lowercase
+        # but the tokenized prompt has uppercase tokens. We bypass HF processor's
+        # expansion and let vLLM handle it via _get_prompt_updates using the
+        # correct token IDs from hf_config.
+        return False
 
     def _get_prompt_updates(
         self,
@@ -1537,25 +1556,20 @@ class HCXVisionV2MultiModalProcessor(
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_config = self.info.get_hf_config()
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        tokenizer = self.info.get_tokenizer()
-        vocab = tokenizer.get_vocab()
 
-        # Get token IDs from tokenizer vocab using HF processor's token strings
-        # This is the same approach as Qwen2-VL
-        placeholder = {
-            "image": vocab.get(hf_processor.image_token, hf_config.image_token_id),
-            "video": vocab.get(hf_processor.video_token, hf_config.video_token_id),
+        # Use token IDs directly from hf_config since we bypass HF processor's
+        # token expansion (see _hf_processor_applies_updates).
+        # These IDs correspond to <|IMAGE_PAD|> and <|VIDEO_PAD|> (uppercase)
+        # which are what the tokenizer actually recognizes.
+        placeholder: dict[str, int] = {
+            "image": hf_config.image_token_id,  # 128060 for <|IMAGE_PAD|>
+            "video": hf_config.video_token_id,  # 128061 for <|VIDEO_PAD|>
         }
 
         # Add audio placeholder if audio is supported
-        audio_token = getattr(hf_processor, "audio_token", None)
-        if audio_token is not None:
-            audio_token_id = vocab.get(
-                audio_token, getattr(hf_config, "audio_token_id", None)
-            )
-            if audio_token_id is not None:
-                placeholder["audio"] = audio_token_id
+        audio_token_id = getattr(hf_config, "audio_token_id", None)
+        if audio_token_id is not None:
+            placeholder["audio"] = audio_token_id
 
         merge_size = hf_config.vision_config.spatial_merge_size
 
