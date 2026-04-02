@@ -21,11 +21,11 @@ GEMMA4_REQUIRED_SYMBOLS = (
 GEMMA4_MODELS = [
     (
         "google/gemma-4-31B-it",
-        "TransformersMultiModalForCausalLM",
+        "Gemma4ForConditionalGeneration",
     ),
     (
         "google/gemma-4-26B-A4B-it",
-        "TransformersMultiModalMoEForCausalLM",
+        "Gemma4ForConditionalGeneration",
     ),
 ]
 
@@ -49,7 +49,7 @@ def _check_gemma4_transformers_version() -> None:
 
 
 @pytest.mark.parametrize(("model_id", "expected_arch"), GEMMA4_MODELS)
-def test_gemma4_uses_transformers_backend(
+def test_gemma4_uses_native_backend(
     model_id: str,
     expected_arch: str,
 ) -> None:
@@ -61,7 +61,7 @@ def test_gemma4_uses_transformers_backend(
     )
 
     assert ctx.model_config.architecture == expected_arch
-    assert ctx.model_config.using_transformers_backend()
+    assert not ctx.model_config.using_transformers_backend()
 
 
 @pytest.mark.parametrize("model_id", [model_id for model_id, _ in GEMMA4_MODELS])
@@ -88,7 +88,8 @@ def test_gemma4_processor_emits_image_placeholders(
         hf_processor.image_token
     )
     image_token_count = processed_inputs["prompt_token_ids"].count(image_token_id)
+    placeholder = processed_inputs["mm_placeholders"]["image"][0]
 
     assert image_token_count > 0
     assert "image" in processed_inputs["mm_placeholders"]
-    assert processed_inputs["mm_placeholders"]["image"][0].length == image_token_count
+    assert placeholder.length == image_token_count + 2
